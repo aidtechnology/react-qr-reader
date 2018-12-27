@@ -1,18 +1,22 @@
 const React = require('react')
+
 const { Component } = React
 const PropTypes = require('prop-types')
 const { getDeviceId, getFacingModePattern } = require('./getDeviceId')
 const havePropsChanged = require('./havePropsChanged')
 const createBlob = require('./createBlob')
-
+const IEWebcam = require('webcamjs')
+const detect = require('react-device-detect')
+const qrcode = require('zxing');
 // Require adapter to support older browser implementations
 require('webrtc-adapter')
 
 // Inline worker.js as a string value of workerBlob.
 // eslint-disable-next-line
 let workerBlob = createBlob([__inline('../lib/worker.js')], {
-  type: 'application/javascript',
+  type: 'application/javascript'
 })
+
 
 // Props that are allowed to change dynamicly
 const propsKeys = ['delay', 'legacyMode', 'facingMode']
@@ -30,23 +34,24 @@ module.exports = class Reader extends Component {
     showViewFinder: PropTypes.bool,
     style: PropTypes.any,
     className: PropTypes.string,
-    constraints: PropTypes.object
+    constraints: PropTypes.object,
+    locationSWF:PropTypes.string
   };
   static defaultProps = {
     delay: 500,
     resolution: 600,
     facingMode: 'environment',
     showViewFinder: true,
-    constraints: null
+    constraints: null,
+    locationSWF: '/assets/webcam.swf'
   };
-
+  
   els = {};
 
   constructor(props) {
     super(props)
-
     this.state = {
-      mirrorVideo: false,
+      mirrorVideo: false
     }
 
     // Bind function to the class
@@ -66,17 +71,19 @@ module.exports = class Reader extends Component {
     // Initiate web worker execute handler according to mode.
     this.worker = new Worker(URL.createObjectURL(workerBlob))
     this.worker.onmessage = this.handleWorkerMessage
-
+    if(detect.isIE){
+      this.initiateIEMode()
+      window.addEventListener('resize', this.resize);
+    }
     if (!this.props.legacyMode) {
       this.initiate()
-    } else {
+    } else  {
       this.initiateLegacyMode()
     }
   }
   componentWillReceiveProps(nextProps) {
     // React according to change in props
     const changedProps = havePropsChanged(this.props, nextProps, propsKeys)
-
     for (const prop of changedProps) {
       if (prop == 'facingMode') {
         this.clearComponent()
@@ -101,6 +108,16 @@ module.exports = class Reader extends Component {
       }
     }
   }
+
+  resize = () => {
+    if (this.els.container.clientWidth < this.oldCameraSize.width - 5) {
+      this.initiateIEMode()
+    } else if(  this.els.container.clientWidth > this.oldCameraSize.width + 5) {
+      this.initiateIEMode()
+    }
+  };
+
+
   shouldComponentUpdate(nextProps, nextState) {
     if(nextState !== this.state){
       return true
@@ -133,15 +150,35 @@ module.exports = class Reader extends Component {
     if (this.els.img) {
       this.els.img.removeEventListener('load', this.check)
     }
+    if(this.iEInterval){
+      clearInterval(this.iEInterval)
+    }
+    if(detect.isIE){
+      IEWebcam.reset()
+      window.removeEventListener('resize', this.resize)
+    }
+  }
+  initiateIEMode(){
+    IEWebcam.init();
+    IEWebcam.setSWFLocation(this.props.locationSWF);
+    IEWebcam.set({
+      width: this.els.container.clientWidth,
+      height: this.els.container.clientWidth,
+      image_format: 'jpeg',
+      jpeg_quality: 90,
+      force_flash: true
+    });
+  this.oldCameraSize = { width: this.els.iewebcam.clientWidth };
+  IEWebcam.attach(this.els.iewebcam)
   }
   initiate(props = this.props) {
-    const { onError, facingMode } = props
-
+    const { onScan, onError, facingMode } = props
     // Check browser facingMode constraint support
     // Firefox ignores facingMode or deviceId constraints
     const isFirefox = /firefox/i.test(navigator.userAgent)
     let supported = {}
-    if (typeof navigator.mediaDevices.getSupportedConstraints === 'function') {
+
+    if (!detect.isIE && typeof navigator.mediaDevices.getSupportedConstraints === 'function') {
       supported = navigator.mediaDevices.getSupportedConstraints()
     }
     const constraints = {}
@@ -153,7 +190,8 @@ module.exports = class Reader extends Component {
       constraints.frameRate = { ideal: 25, min: 10 }
     }
 
-    const vConstraintsPromise = (supported.facingMode || isFirefox)
+    if(!detect.isIE){
+      const vConstraintsPromise = (supported.facingMode || isFirefox)
       ? Promise.resolve(props.constraints || constraints)
       : getDeviceId(facingMode).then(deviceId => Object.assign({}, { deviceId }, props.constraints))
 
@@ -161,17 +199,37 @@ module.exports = class Reader extends Component {
       .then(video => navigator.mediaDevices.getUserMedia({ video }))
       .then(this.handleVideo)
       .catch(onError)
+    }
+    else{
+     this.iEInterval = setInterval(()=>{
+        try {
+        IEWebcam.snap(data_uri =>{
+          qrcode.decode([data_uri ],(err, result) => {
+            if (!err && result) {
+              onScan(result);
+              return;
+            }
+         
+          })
+        });
+      }
+      catch (err) {
+       console.log(err);
+      }
+      },1000)
+    }
+
   }
+
   handleVideo(stream) {
     const { preview } = this.els
-
     // Preview element hasn't been rendered so wait for it.
     if (!preview) {
       setTimeout(this.handleVideo, 200, stream)
     }
-
+   
     // Handle different browser implementations of MediaStreams as src
-    if(preview.srcObject !== undefined){
+    else if(preview.srcObject !== undefined){
       preview.srcObject = stream
     } else if (preview.mozSrcObject !== undefined) {
       preview.mozSrcObject = stream
@@ -201,11 +259,11 @@ module.exports = class Reader extends Component {
     const preview = this.els.preview
     preview.play()
 
-    if(typeof onLoad == 'function') {
+    if(typeof onLoad === 'function') {
       onLoad()
     }
 
-    if (typeof delay == 'number') {
+    if (typeof delay === 'number') {
       this.timeout = setTimeout(this.check, delay)
     }
 
@@ -215,10 +273,14 @@ module.exports = class Reader extends Component {
   check() {
     const { legacyMode, resolution, delay } = this.props
     const { preview, canvas, img } = this.els
-
     // Get image/video dimensions
-    let width = Math.floor(legacyMode ? img.naturalWidth : preview.videoWidth)
-    let height = Math.floor(legacyMode ? img.naturalHeight : preview.videoHeight)
+
+    let  width = Math.floor(legacyMode ? img.naturalWidth : preview.videoWidth)
+    let  height = Math.floor(legacyMode ? img.naturalHeight : preview.videoHeight)
+
+     
+  
+  
 
     // Canvas draw offsets
     let hozOffset = 0
@@ -253,12 +315,12 @@ module.exports = class Reader extends Component {
 
     const previewIsPlaying = preview &&
       preview.readyState === preview.HAVE_ENOUGH_DATA
-
     if (legacyMode || previewIsPlaying) {
       const ctx = canvas.getContext('2d')
 
       ctx.drawImage(legacyMode ? img : preview, hozOffset, vertOffset, width, height)
-
+    
+     
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
       // Send data to web-worker
       this.worker.postMessage(imageData)
@@ -272,7 +334,7 @@ module.exports = class Reader extends Component {
     const decoded = e.data
     onScan(decoded || null)
 
-    if (!legacyMode && typeof delay == 'number' && this.worker) {
+    if (!legacyMode && typeof delay === 'number' && this.worker) {
       this.timeout = setTimeout(this.check, delay)
     }
   }
@@ -284,7 +346,7 @@ module.exports = class Reader extends Component {
     // Reset componentDidUpdate
     this.componentDidUpdate = undefined
 
-    if(typeof this.props.onLoad == 'function') {
+    if(typeof this.props.onLoad === 'function') {
       this.props.onLoad()
     }
   }
@@ -305,21 +367,101 @@ module.exports = class Reader extends Component {
       this.els[key] = element
     }
   }
-  render() {
+  renderIE(){
+    const {
+      style,
+      className,
+      legacyMode,
+      showViewFinder,
+      onImageLoad
+    } = this.props
+
+    const containerStyle = {
+      position: 'relative',
+      width: '100%',
+      backgroundColor: 'white'
+    }
+
+    const viewFinderStyle = {
+      top: 0,
+      left: 0,
+      zIndex: 0,
+      border: '50px solid transparent',
+      boxShadow: 'inset 0px 0px 0px 5px rgb(255,0,0)',
+      position: 'absolute',
+      width: '100%',
+      height: '100%'
+    }
+    const hiddenStyle = { display: 'none' }
+
+    const previewStyle = {
+      top: 0,
+      left: 0,
+      display: 'block',
+      position: 'absolute',
+      overflow: 'hidden',
+      width: '100%',
+      height: '100%'
+    }
+
+    const imgPreviewStyle = {
+      ...previewStyle,
+      objectFit: 'scale-down'
+    }
+
+
+    const cameraStyle = {
+      zIndex: 1,
+      opacity: 0.85,
+      width: '100% !important',
+      height: '100% !important'
+    }
+
+    return (
+      <section className={className} style={style}>
+        <section style={containerStyle} ref={this.setRefFactory('container')}>
+          {
+            (!legacyMode && showViewFinder)
+            ? <div style={viewFinderStyle} />
+            : null
+          }
+          {
+            legacyMode
+              ? <input
+                style={hiddenStyle}
+                type="file"
+                accept="image/*"
+                ref={this.setRefFactory('input')}
+                onChange={this.handleInputChange}
+              />
+              : null
+          }
+          {
+            legacyMode
+              ? <img alt='' style={imgPreviewStyle} ref={this.setRefFactory('img')} onLoad={onImageLoad} />
+              : <div style={cameraStyle} ref={this.setRefFactory('iewebcam')} />
+          }
+        </section>
+      </section>
+    )
+
+
+
+  }
+  renderDefault (){
     const {
       style,
       className,
       onImageLoad,
       legacyMode,
-      showViewFinder,
-      facingMode
+      showViewFinder
     } = this.props
 
     const containerStyle = {
       overflow: 'hidden',
       position: 'relative',
       width: '100%',
-      paddingTop: '100%',
+      paddingTop: '100%'
     }
     const hiddenStyle = { display: 'none' }
     const previewStyle = {
@@ -329,16 +471,16 @@ module.exports = class Reader extends Component {
       position: 'absolute',
       overflow: 'hidden',
       width: '100%',
-      height: '100%',
+      height: '100%'
     }
     const videoPreviewStyle = {
       ...previewStyle,
       objectFit: 'cover',
-      transform: this.state.mirrorVideo ? 'scaleX(-1)' : undefined,
+      transform: this.state.mirrorVideo ? 'scaleX(-1)' : undefined
     }
     const imgPreviewStyle = {
       ...previewStyle,
-      objectFit: 'scale-down',
+      objectFit: 'scale-down'
     }
 
     const viewFinderStyle = {
@@ -350,8 +492,10 @@ module.exports = class Reader extends Component {
       boxShadow: 'inset 0 0 0 5px rgba(255, 0, 0, 0.5)',
       position: 'absolute',
       width: '100%',
-      height: '100%',
+      height: '100%'
     }
+
+
 
     return (
       <section className={className} style={style}>
@@ -377,10 +521,12 @@ module.exports = class Reader extends Component {
               ? <img style={imgPreviewStyle} ref={this.setRefFactory('img')} onLoad={onImageLoad} />
               : <video style={videoPreviewStyle} ref={this.setRefFactory('preview')} />
           }
-
           <canvas style={hiddenStyle} ref={this.setRefFactory('canvas')} />
         </section>
       </section>
     )
+  }
+  render() {
+  return detect.isIE ? this.renderIE() : this.renderDefault();
   }
 }

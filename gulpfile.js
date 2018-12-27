@@ -13,6 +13,7 @@ const paths = {
   worker: 'src/worker.js',
   jsQR: 'node_modules/jsqr/dist/jsQR.js',
   destination: './lib',
+  webcamIE: './node_modules/webcamjs/webcam.swf'
 }
 
 gulp.task('clean', function() {
@@ -27,13 +28,19 @@ gulp.task('worker', [ 'clean' ], function() {
     .pipe(gulp.dest(paths.destination))
 })
 
-gulp.task('build', [ 'worker' ], function() {
+gulp.task('build', [ 'worker','copy' ], function() {
   return gulp
     .src(paths.scripts)
     .pipe(inlineStr({ basePath: paths.destination }))
     .pipe(babel(babelOptions))
     .pipe(gulp.dest(paths.destination))
 })
+
+gulp.task('copy', function () {
+  return gulp
+          .src(paths.webcamIE)
+          .pipe(gulp.dest(paths.destination));
+});
 
 // Rerun the task when a file changes
 gulp.task('watch', function() {
